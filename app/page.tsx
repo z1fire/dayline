@@ -20,7 +20,7 @@ type InstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 };
 
-const DAY_START = 6 * 60;
+const DEFAULT_DAY_START = 6 * 60;
 const DAY_END = 23 * 60;
 const HOUR_HEIGHT = 72;
 const categories: { id: Category; label: string; symbol: string }[] = [
@@ -185,11 +185,60 @@ function starterActivities(date: string): Activity[] {
   ];
 }
 
+function layoutOverlappingActivities(items: Activity[]) {
+  const sorted = [...items].sort(
+    (a, b) => minutes(a.start) - minutes(b.start),
+  );
+  const positioned: {
+    activity: Activity;
+    lane: number;
+    laneCount: number;
+  }[] = [];
+  let group: Activity[] = [];
+  let groupEnd = -1;
+
+  const placeGroup = () => {
+    if (!group.length) return;
+    const laneEnds: number[] = [];
+    const groupPositions = group.map((activity) => {
+      const startMinute = minutes(activity.start);
+      let lane = laneEnds.findIndex((endMinute) => endMinute <= startMinute);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(minutes(activity.end));
+      } else {
+        laneEnds[lane] = minutes(activity.end);
+      }
+      return { activity, lane };
+    });
+    const laneCount = laneEnds.length;
+    positioned.push(
+      ...groupPositions.map((item) => ({ ...item, laneCount })),
+    );
+  };
+
+  sorted.forEach((activity) => {
+    const startMinute = minutes(activity.start);
+    if (group.length && startMinute >= groupEnd) {
+      placeGroup();
+      group = [];
+      groupEnd = -1;
+    }
+    group.push(activity);
+    groupEnd = Math.max(groupEnd, minutes(activity.end));
+  });
+  placeGroup();
+  return positioned;
+}
+
 export default function Home() {
   const [selectedDate, setSelectedDate] = useState(() => toDateKey(new Date()));
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [dayStart, setDayStart] = useState(DEFAULT_DAY_START);
+  const [pendingDayStart, setPendingDayStart] = useState(DEFAULT_DAY_START);
   const [loading, setLoading] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [start, setStart] = useState("09:00");
@@ -244,6 +293,15 @@ export default function Home() {
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
+    const storedDayStart = Number(localStorage.getItem("dayline-day-start"));
+    if (
+      Number.isInteger(storedDayStart) &&
+      storedDayStart >= 0 &&
+      storedDayStart <= 12 * 60
+    ) {
+      setDayStart(storedDayStart);
+      setPendingDayStart(storedDayStart);
+    }
     const base = new URL("./", document.baseURI);
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register(new URL("sw.js", base).pathname, {
@@ -262,13 +320,16 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!sheetOpen) return;
+    if (!sheetOpen && !settingsOpen) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setSheetOpen(false);
+      if (event.key === "Escape") {
+        setSheetOpen(false);
+        setSettingsOpen(false);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [sheetOpen]);
+  }, [sheetOpen, settingsOpen]);
 
   const plannedMinutes = useMemo(
     () =>
@@ -288,29 +349,43 @@ export default function Home() {
         ),
     [activities],
   );
+  const coveredMinutes = useMemo(() => {
+    const intervals = activities
+      .map((item) => [
+        Math.max(dayStart, minutes(item.start)),
+        Math.min(DAY_END, minutes(item.end)),
+      ])
+      .filter(([intervalStart, intervalEnd]) => intervalEnd > intervalStart)
+      .sort((a, b) => a[0] - b[0]);
+    let total = 0;
+    let currentStart = -1;
+    let currentEnd = -1;
+    intervals.forEach(([intervalStart, intervalEnd]) => {
+      if (currentStart === -1 || intervalStart > currentEnd) {
+        if (currentStart !== -1) total += currentEnd - currentStart;
+        currentStart = intervalStart;
+        currentEnd = intervalEnd;
+      } else {
+        currentEnd = Math.max(currentEnd, intervalEnd);
+      }
+    });
+    if (currentStart !== -1) total += currentEnd - currentStart;
+    return total;
+  }, [activities, dayStart]);
   const completion = plannedMinutes
     ? Math.round((completedMinutes / plannedMinutes) * 100)
     : 0;
   const isToday = selectedDate === toDateKey(new Date());
-  const hasConflict =
-    minutes(start) < minutes(end) &&
-    activities.some(
-      (item) =>
-        item.id !== editingId &&
-        minutes(start) < minutes(item.end) &&
-        minutes(end) > minutes(item.start),
-    );
   const isWithinDay =
-    minutes(start) >= DAY_START && minutes(end) <= DAY_END;
+    minutes(start) >= dayStart && minutes(end) <= DAY_END;
   const isValid =
     title.trim() &&
     minutes(start) < minutes(end) &&
-    isWithinDay &&
-    !hasConflict;
+    isWithinDay;
 
   function openCreate(startMinute = 9 * 60) {
     const rounded = Math.round(startMinute / 15) * 15;
-    const safeStart = Math.min(DAY_END - 30, Math.max(DAY_START, rounded));
+    const safeStart = Math.min(DAY_END - 30, Math.max(dayStart, rounded));
     setEditingId(null);
     setTitle("");
     setStart(minuteTime(safeStart));
@@ -377,7 +452,7 @@ export default function Home() {
     if ((event.target as HTMLElement).closest(".activity-block")) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const offset = Math.max(0, Math.min(bounds.height, event.clientY - bounds.top));
-    openCreate(DAY_START + (offset / HOUR_HEIGHT) * 60);
+    openCreate(dayStart + (offset / HOUR_HEIGHT) * 60);
   }
 
   function keyboardOpen(event: KeyboardEvent<HTMLDivElement>, item: Activity) {
@@ -394,13 +469,34 @@ export default function Home() {
     setInstallPrompt(null);
   }
 
+  function openDaySettings() {
+    setPendingDayStart(dayStart);
+    setSettingsOpen(true);
+  }
+
+  function saveDaySettings() {
+    setDayStart(pendingDayStart);
+    localStorage.setItem("dayline-day-start", String(pendingDayStart));
+    setSettingsOpen(false);
+  }
+
   const timelineHours = Array.from(
-    { length: (DAY_END - DAY_START) / 60 + 1 },
-    (_, index) => DAY_START / 60 + index,
+    { length: (DAY_END - dayStart) / 60 + 1 },
+    (_, index) => dayStart / 60 + index,
   );
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const showNow =
-    isToday && nowMinutes >= DAY_START && nowMinutes <= DAY_END;
+    isToday && nowMinutes >= dayStart && nowMinutes <= DAY_END;
+  const hiddenBlocks = activities.filter(
+    (item) => minutes(item.start) < dayStart,
+  );
+  const visibleActivities = activities.filter(
+    (item) => minutes(item.start) >= dayStart,
+  );
+  const positionedActivities = useMemo(
+    () => layoutOverlappingActivities(visibleActivities),
+    [visibleActivities],
+  );
 
   return (
     <main className="app-shell">
@@ -467,8 +563,8 @@ export default function Home() {
             <strong>{formatDuration(plannedMinutes)} planned</strong>
             <p>
               {activities.length
-                ? `${activities.length} ${activities.length === 1 ? "block" : "blocks"} · ${formatDuration(
-                    Math.max(0, DAY_END - DAY_START - plannedMinutes),
+                  ? `${activities.length} ${activities.length === 1 ? "block" : "blocks"} · ${formatDuration(
+                    Math.max(0, DAY_END - dayStart - coveredMinutes),
                   )} open`
                 : "A clear day, ready to shape"}
             </p>
@@ -497,20 +593,37 @@ export default function Home() {
             <span className="eyebrow">Schedule</span>
             <h1>Make room for what matters.</h1>
           </div>
-          <button className="add-text-button" type="button" onClick={() => openCreate()}>
-            <span aria-hidden="true">＋</span> Add block
-          </button>
+          <div className="schedule-actions">
+            <button
+              className="day-start-button"
+              type="button"
+              onClick={openDaySettings}
+              aria-label={`Change day start time, currently ${friendlyTime(minuteTime(dayStart))}`}
+            >
+              Starts {friendlyTime(minuteTime(dayStart)).replace(":00", "")}
+            </button>
+            <button className="add-text-button" type="button" onClick={() => openCreate()}>
+              <span aria-hidden="true">＋</span> Add block
+            </button>
+          </div>
         </div>
+
+        {hiddenBlocks.length > 0 && (
+          <button className="hidden-blocks-notice" type="button" onClick={openDaySettings}>
+            {hiddenBlocks.length} earlier {hiddenBlocks.length === 1 ? "block is" : "blocks are"} hidden
+            <span>Show earlier hours</span>
+          </button>
+        )}
 
         <div
           className={`timeline ${loading ? "is-loading" : ""}`}
-          style={{ height: `${(DAY_END - DAY_START) / 60 * HOUR_HEIGHT}px` }}
+          style={{ height: `${(DAY_END - dayStart) / 60 * HOUR_HEIGHT}px` }}
           onDoubleClick={chooseTimelineTime}
         >
           {timelineHours.map((hour) => (
             <div
               className="hour-line"
-              style={{ top: `${(hour - DAY_START / 60) * HOUR_HEIGHT}px` }}
+              style={{ top: `${(hour - dayStart / 60) * HOUR_HEIGHT}px` }}
               key={hour}
             >
               <span>{friendlyTime(`${String(hour).padStart(2, "0")}:00`).replace(":00", "")}</span>
@@ -520,25 +633,30 @@ export default function Home() {
           {showNow && (
             <div
               className="now-line"
-              style={{ top: `${((nowMinutes - DAY_START) / 60) * HOUR_HEIGHT}px` }}
+              style={{ top: `${((nowMinutes - dayStart) / 60) * HOUR_HEIGHT}px` }}
             >
               <span>now</span>
             </div>
           )}
 
-          {!loading &&
-            activities.map((item) => {
-              const top = ((minutes(item.start) - DAY_START) / 60) * HOUR_HEIGHT;
+          {!loading && (
+            <div className="activity-layer">
+              {positionedActivities.map(({ activity: item, lane, laneCount }) => {
+              const top = ((minutes(item.start) - dayStart) / 60) * HOUR_HEIGHT;
               const height =
                 ((minutes(item.end) - minutes(item.start)) / 60) * HOUR_HEIGHT;
               return (
                 <div
                   className={`activity-block category-${item.category} ${
+                    laneCount > 1 ? "is-stacked" : ""
+                  } ${
                     item.completed ? "is-complete" : ""
                   }`}
                   style={{
                     top: `${top}px`,
                     height: `${Math.max(48, height - 6)}px`,
+                    left: `${(lane / laneCount) * 100}%`,
+                    width: `calc(${100 / laneCount}% - 4px)`,
                   }}
                   key={item.id}
                   role="button"
@@ -569,7 +687,9 @@ export default function Home() {
                   </span>
                 </div>
               );
-            })}
+              })}
+            </div>
+          )}
 
           {!loading && activities.length === 0 && (
             <button className="empty-day" type="button" onClick={() => openCreate()}>
@@ -635,7 +755,7 @@ export default function Home() {
                   <input
                     type="time"
                     value={start}
-                    min="06:00"
+                    min={minuteTime(dayStart)}
                     max="22:30"
                     step={900}
                     onChange={(event) => setStart(event.target.value)}
@@ -654,6 +774,9 @@ export default function Home() {
                   />
                 </label>
               </div>
+              <p className="field-hint">
+                Overlapping blocks are allowed and will appear side by side.
+              </p>
 
               <fieldset className="category-field">
                 <legend>Color</legend>
@@ -695,15 +818,9 @@ export default function Home() {
               )}
               {!isWithinDay && (
                 <p className="form-warning">
-                  Dayline schedules blocks between 6:00 AM and 11:00 PM.
+                  Dayline currently starts at {friendlyTime(minuteTime(dayStart))} and ends at 11:00 PM.
                 </p>
               )}
-              {hasConflict && (
-                <p className="form-warning">
-                  This overlaps another block. Choose an open time to continue.
-                </p>
-              )}
-
               <div className="form-actions">
                 {editingId && (
                   <button className="delete-button" type="button" onClick={deleteCurrent}>
@@ -715,6 +832,54 @@ export default function Home() {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div className="sheet-backdrop" onMouseDown={() => setSettingsOpen(false)}>
+          <section
+            className="activity-sheet settings-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="sheet-handle" />
+            <div className="sheet-header">
+              <div>
+                <span className="eyebrow">Timeline settings</span>
+                <h2 id="settings-title">When does your day start?</h2>
+              </div>
+              <button
+                className="close-button"
+                type="button"
+                aria-label="Close"
+                onClick={() => setSettingsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <p className="settings-copy">
+              Choose the first hour shown on your daily timeline. This preference stays on this device.
+            </p>
+            <div className="hour-picker" role="radiogroup" aria-label="Day start time">
+              {Array.from({ length: 13 }, (_, hour) => hour).map((hour) => (
+                <button
+                  className={pendingDayStart === hour * 60 ? "is-selected" : ""}
+                  type="button"
+                  role="radio"
+                  aria-checked={pendingDayStart === hour * 60}
+                  key={hour}
+                  onClick={() => setPendingDayStart(hour * 60)}
+                >
+                  {friendlyTime(minuteTime(hour * 60)).replace(":00", "")}
+                </button>
+              ))}
+            </div>
+            <button className="save-button settings-save" type="button" onClick={saveDaySettings}>
+              Start my day at {friendlyTime(minuteTime(pendingDayStart))}
+            </button>
           </section>
         </div>
       )}

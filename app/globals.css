@@ -271,12 +271,53 @@ textarea:focus-visible,
   margin-bottom: 17px;
 }
 
+.schedule-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.day-start-button {
+  border: 1px solid #d7d4cc;
+  border-radius: 999px;
+  background: rgba(255, 253, 249, 0.76);
+  padding: 9px 11px;
+  color: #58605b;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .schedule-heading h1 {
   margin: 3px 0 0;
   font-family: var(--font-display);
   font-size: clamp(23px, 6vw, 32px);
   line-height: 1.08;
   letter-spacing: -0.05em;
+}
+
+.hidden-blocks-notice {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  margin: -3px 0 17px;
+  border: 1px solid #e4c7bd;
+  border-radius: 12px;
+  background: #fff2ed;
+  padding: 9px 11px;
+  color: #8f4434;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.hidden-blocks-notice span {
+  color: var(--accent-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .add-text-button {
@@ -325,10 +366,17 @@ textarea:focus-visible,
   text-align: left;
 }
 
+.activity-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 54px;
+  pointer-events: none;
+}
+
 .activity-block {
   position: absolute;
-  right: 0;
-  left: 54px;
   z-index: 2;
   display: flex;
   min-height: 48px;
@@ -340,9 +388,27 @@ textarea:focus-visible,
   padding: 11px 12px;
   box-shadow: 0 8px 20px rgba(38, 47, 42, 0.07);
   cursor: pointer;
+  pointer-events: auto;
   transition:
     transform 160ms ease,
     box-shadow 160ms ease;
+}
+
+.activity-block.is-stacked {
+  gap: 6px;
+  padding: 9px 8px;
+}
+
+.activity-block.is-stacked .complete-button {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  font-size: 10px;
+}
+
+.activity-block.is-stacked .activity-time,
+.activity-block.is-stacked .activity-copy small {
+  display: none;
 }
 
 .activity-block:active {
@@ -642,6 +708,12 @@ textarea:focus-visible,
   gap: 9px;
 }
 
+.field-hint {
+  margin: -10px 0 16px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .time-connector {
   margin-top: 8px;
   color: #989d99;
@@ -710,6 +782,42 @@ textarea:focus-visible,
   cursor: pointer;
 }
 
+.settings-copy {
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.hour-picker {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.hour-picker button {
+  min-height: 43px;
+  border: 1px solid #dad7cf;
+  border-radius: 12px;
+  background: #faf9f5;
+  color: #5e6561;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.hour-picker button.is-selected {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: white;
+  box-shadow: 0 7px 15px rgba(23, 34, 31, 0.16);
+}
+
+.settings-save {
+  width: 100%;
+}
+
 .save-button {
   flex: 1;
   border: 0;
@@ -752,7 +860,7 @@ textarea:focus-visible,
     display: block;
   }
 
-  .activity-block {
+  .activity-layer {
     left: 70px;
   }
 
