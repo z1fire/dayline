@@ -1,6 +1,14 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type Category = "focus" | "health" | "admin" | "personal" | "rest";
 
@@ -247,8 +255,27 @@ export default function Home() {
   const [note, setNote] = useState("");
   const [storageError, setStorageError] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [dragPreview, setDragPreview] = useState<{
+    id: string;
+    start: number;
+    duration: number;
+  } | null>(null);
   const [installPrompt, setInstallPrompt] =
     useState<InstallPromptEvent | null>(null);
+  const pressTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+  const pressRef = useRef<{
+    id: string;
+    pointerId: number;
+    element: HTMLDivElement;
+    pointerStartY: number;
+    scrollStartY: number;
+    originStart: number;
+    duration: number;
+    currentStart: number;
+    active: boolean;
+    movedBeforeHold: boolean;
+  } | null>(null);
 
   async function refresh(date = selectedDate) {
     try {
@@ -315,6 +342,9 @@ export default function Home() {
     window.addEventListener("beforeinstallprompt", handleInstall);
     return () => {
       window.clearInterval(timer);
+      if (pressTimerRef.current !== null) {
+        window.clearTimeout(pressTimerRef.current);
+      }
       window.removeEventListener("beforeinstallprompt", handleInstall);
     };
   }, []);
@@ -445,6 +475,140 @@ export default function Home() {
       await refresh();
     } catch {
       setStorageError(true);
+    }
+  }
+
+  function clearPressTimer() {
+    if (pressTimerRef.current !== null) {
+      window.clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+  }
+
+  function beginBlockPress(
+    event: ReactPointerEvent<HTMLDivElement>,
+    activity: Activity,
+  ) {
+    if (
+      event.button !== 0 ||
+      (event.target as HTMLElement).closest(".complete-button")
+    ) {
+      return;
+    }
+
+    clearPressTimer();
+    const element = event.currentTarget;
+    element.setPointerCapture(event.pointerId);
+    const originStart = minutes(activity.start);
+    const duration = minutes(activity.end) - originStart;
+    pressRef.current = {
+      id: activity.id,
+      pointerId: event.pointerId,
+      element,
+      pointerStartY: event.clientY,
+      scrollStartY: window.scrollY,
+      originStart,
+      duration,
+      currentStart: originStart,
+      active: false,
+      movedBeforeHold: false,
+    };
+
+    pressTimerRef.current = window.setTimeout(() => {
+      const press = pressRef.current;
+      if (!press || press.id !== activity.id) return;
+      press.active = true;
+      suppressClickRef.current = true;
+      setDragPreview({
+        id: activity.id,
+        start: originStart,
+        duration,
+      });
+      navigator.vibrate?.(18);
+    }, 320);
+  }
+
+  function moveBlockPress(event: ReactPointerEvent<HTMLDivElement>) {
+    const press = pressRef.current;
+    if (!press || press.pointerId !== event.pointerId) return;
+    const pointerDelta =
+      event.clientY -
+      press.pointerStartY +
+      (window.scrollY - press.scrollStartY);
+
+    if (!press.active) {
+      if (Math.abs(pointerDelta) > 8) {
+        press.movedBeforeHold = true;
+        suppressClickRef.current = true;
+        clearPressTimer();
+      }
+      return;
+    }
+
+    event.preventDefault();
+    if (event.clientY < 72) {
+      window.scrollBy({ top: -12, behavior: "auto" });
+    } else if (event.clientY > window.innerHeight - 72) {
+      window.scrollBy({ top: 12, behavior: "auto" });
+    }
+
+    const unsnappedStart =
+      press.originStart + (pointerDelta / HOUR_HEIGHT) * 60;
+    const snappedStart = Math.round(unsnappedStart / 15) * 15;
+    const nextStart = Math.min(
+      DAY_END - press.duration,
+      Math.max(dayStart, snappedStart),
+    );
+    press.currentStart = nextStart;
+    setDragPreview({
+      id: press.id,
+      start: nextStart,
+      duration: press.duration,
+    });
+  }
+
+  async function endBlockPress(
+    event: ReactPointerEvent<HTMLDivElement>,
+    shouldSave: boolean,
+  ) {
+    const press = pressRef.current;
+    if (!press || press.pointerId !== event.pointerId) return;
+    clearPressTimer();
+    if (press.element.hasPointerCapture(event.pointerId)) {
+      press.element.releasePointerCapture(event.pointerId);
+    }
+    pressRef.current = null;
+
+    if (!press.active) {
+      if (press.movedBeforeHold) {
+        window.setTimeout(() => {
+          suppressClickRef.current = false;
+        }, 0);
+      }
+      return;
+    }
+    setDragPreview(null);
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+    if (!shouldSave || press.currentStart === press.originStart) return;
+
+    const activity = activities.find((item) => item.id === press.id);
+    if (!activity) return;
+    const movedActivity = {
+      ...activity,
+      start: minuteTime(press.currentStart),
+      end: minuteTime(press.currentStart + press.duration),
+    };
+    setActivities((items) =>
+      items.map((item) => (item.id === movedActivity.id ? movedActivity : item)),
+    );
+    try {
+      await writeActivity(movedActivity);
+      await refresh();
+    } catch {
+      setStorageError(true);
+      await refresh();
     }
   }
 
@@ -642,7 +806,11 @@ export default function Home() {
           {!loading && (
             <div className="activity-layer">
               {positionedActivities.map(({ activity: item, lane, laneCount }) => {
-              const top = ((minutes(item.start) - dayStart) / 60) * HOUR_HEIGHT;
+              const isDragging = dragPreview?.id === item.id;
+              const displayedStart = isDragging
+                ? dragPreview!.start
+                : minutes(item.start);
+              const top = ((displayedStart - dayStart) / 60) * HOUR_HEIGHT;
               const height =
                 ((minutes(item.end) - minutes(item.start)) / 60) * HOUR_HEIGHT;
               return (
@@ -651,6 +819,8 @@ export default function Home() {
                     laneCount > 1 ? "is-stacked" : ""
                   } ${
                     item.completed ? "is-complete" : ""
+                  } ${
+                    isDragging ? "is-dragging" : ""
                   }`}
                   style={{
                     top: `${top}px`,
@@ -661,10 +831,27 @@ export default function Home() {
                   key={item.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => openEdit(item)}
+                  onPointerDown={(event) => beginBlockPress(event, item)}
+                  onPointerMove={moveBlockPress}
+                  onPointerUp={(event) => endBlockPress(event, true)}
+                  onPointerCancel={(event) => endBlockPress(event, false)}
+                  onContextMenu={(event) => event.preventDefault()}
+                  onClick={() => {
+                    if (!suppressClickRef.current) openEdit(item);
+                  }}
                   onKeyDown={(event) => keyboardOpen(event, item)}
-                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}`}
+                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}. Press and hold to move.`}
+                  aria-grabbed={isDragging}
                 >
+                  {isDragging && (
+                    <span className="drag-time-pill">
+                      {friendlyTime(minuteTime(dragPreview!.start))}
+                      {" — "}
+                      {friendlyTime(
+                        minuteTime(dragPreview!.start + dragPreview!.duration),
+                      )}
+                    </span>
+                  )}
                   <button
                     className="complete-button"
                     type="button"

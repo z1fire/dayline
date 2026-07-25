@@ -387,8 +387,11 @@ textarea:focus-visible,
   border-radius: 15px;
   padding: 11px 12px;
   box-shadow: 0 8px 20px rgba(38, 47, 42, 0.07);
-  cursor: pointer;
+  cursor: grab;
   pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     transform 160ms ease,
     box-shadow 160ms ease;
@@ -413,6 +416,35 @@ textarea:focus-visible,
 
 .activity-block:active {
   transform: scale(0.992);
+}
+
+.activity-block.is-dragging {
+  z-index: 12;
+  opacity: 0.96;
+  box-shadow: 0 18px 38px rgba(23, 34, 31, 0.24);
+  cursor: grabbing;
+  transform: scale(1.018);
+  transition: box-shadow 120ms ease, transform 120ms ease;
+}
+
+.activity-block.is-dragging .activity-time {
+  opacity: 0;
+}
+
+.drag-time-pill {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  z-index: 2;
+  border-radius: 999px;
+  background: var(--ink);
+  padding: 4px 7px;
+  color: white;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .category-focus {
