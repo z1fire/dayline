@@ -387,7 +387,7 @@ textarea:focus-visible,
   position: absolute;
   z-index: 2;
   display: flex;
-  min-height: 48px;
+  min-height: 0;
   align-items: flex-start;
   gap: 10px;
   overflow: hidden;
@@ -403,6 +403,49 @@ textarea:focus-visible,
   transition:
     transform 160ms ease,
     box-shadow 160ms ease;
+}
+
+.activity-block.is-compact {
+  align-items: center;
+  gap: 7px;
+  border-radius: 11px;
+  padding: 4px 8px;
+}
+
+.activity-block.is-compact .complete-button {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  font-size: 9px;
+}
+
+.activity-block.is-compact .activity-copy strong {
+  font-size: 11px;
+}
+
+.activity-block.is-compact .activity-time {
+  font-size: 8px;
+}
+
+.activity-block.is-micro {
+  gap: 4px;
+  border-radius: 7px;
+  padding: 1px 6px;
+}
+
+.activity-block.is-micro .complete-button,
+.activity-block.is-micro .activity-time,
+.activity-block.is-micro .repeat-badge {
+  display: none;
+}
+
+.activity-block.is-micro .activity-copy strong {
+  font-size: 9px;
+  line-height: 1;
+}
+
+.activity-block.is-micro .resize-handle::after {
+  display: none;
 }
 
 .activity-block.is-stacked {

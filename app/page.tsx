@@ -1291,6 +1291,9 @@ export default function Home() {
               const top = ((displayedStart - dayStart) / 60) * HOUR_HEIGHT;
               const height =
                 ((displayedEnd - displayedStart) / 60) * HOUR_HEIGHT;
+              const displayedDuration = displayedEnd - displayedStart;
+              const isCompact = displayedDuration <= 30;
+              const isMicro = displayedDuration <= 15;
               const isRecurring =
                 Boolean(item.seriesId) ||
                 (item.repeat !== undefined && item.repeat !== "none");
@@ -1304,10 +1307,14 @@ export default function Home() {
                     isDragging ? "is-dragging" : ""
                   } ${
                     isResizing ? "is-resizing" : ""
+                  } ${
+                    isCompact ? "is-compact" : ""
+                  } ${
+                    isMicro ? "is-micro" : ""
                   }`}
                   style={{
                     top: `${top}px`,
-                    height: `${Math.max(48, height - 6)}px`,
+                    height: `${Math.max(14, height - 4)}px`,
                     left: `${(lane / laneCount) * 100}%`,
                     width: `calc(${100 / laneCount}% - 4px)`,
                   }}
