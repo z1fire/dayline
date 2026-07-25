@@ -10,7 +10,7 @@ IndexedDB and continue to work offline after the first visit.
 - move between dates and see planned/open time at a glance
 - add, edit, complete, and delete blocks
 - overlap blocks and see them side by side
-- press and hold to move blocks, or drag their edges to resize them
+- tap a block’s adjust control, then drag its middle to move or an edge to resize
 - repeat blocks daily, weekly, on selected weekdays, or every few days
 - copy another day or save reusable day templates
 - choose how early the timeline starts

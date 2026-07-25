@@ -470,6 +470,7 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [storageError, setStorageError] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [adjustingId, setAdjustingId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<{
     id: string;
     start: number;
@@ -600,6 +601,21 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(""), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!adjustingId) return;
+    const timer = window.setTimeout(() => setAdjustingId(null), 8000);
+    const disarmOnScroll = () => {
+      if (!pressRef.current?.active && !resizeRef.current) {
+        setAdjustingId(null);
+      }
+    };
+    window.addEventListener("scroll", disarmOnScroll, { passive: true });
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("scroll", disarmOnScroll);
+    };
+  }, [adjustingId]);
 
   const plannedMinutes = useMemo(
     () =>
@@ -805,9 +821,13 @@ export default function Home() {
     event: ReactPointerEvent<HTMLDivElement>,
     activity: Activity,
   ) {
+    const adjustmentActive = adjustingId === activity.id;
     if (
       event.button !== 0 ||
-      (event.target as HTMLElement).closest(".complete-button, .resize-handle")
+      (event.target as HTMLElement).closest(
+        ".complete-button, .adjust-button, .resize-handle",
+      ) ||
+      (event.pointerType === "touch" && !adjustmentActive)
     ) {
       return;
     }
@@ -826,9 +846,20 @@ export default function Home() {
       originStart,
       duration,
       currentStart: originStart,
-      active: false,
+      active: adjustmentActive,
       movedBeforeHold: false,
     };
+
+    if (adjustmentActive) {
+      suppressClickRef.current = true;
+      setDragPreview({
+        id: activity.id,
+        start: originStart,
+        duration,
+      });
+      navigator.vibrate?.(12);
+      return;
+    }
 
     pressTimerRef.current = window.setTimeout(() => {
       const press = pressRef.current;
@@ -907,7 +938,12 @@ export default function Home() {
     window.setTimeout(() => {
       suppressClickRef.current = false;
     }, 0);
-    if (!shouldSave || press.currentStart === press.originStart) return;
+    if (!shouldSave) {
+      setAdjustingId(null);
+      return;
+    }
+    if (press.currentStart === press.originStart) return;
+    setAdjustingId(null);
 
     const activity = activities.find((item) => item.id === press.id);
     if (!activity) return;
@@ -936,7 +972,7 @@ export default function Home() {
     activity: Activity,
     edge: "start" | "end",
   ) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || adjustingId !== activity.id) return;
     event.stopPropagation();
     event.preventDefault();
     clearPressTimer();
@@ -1014,13 +1050,17 @@ export default function Home() {
     window.setTimeout(() => {
       suppressClickRef.current = false;
     }, 0);
+    if (!shouldSave) {
+      setAdjustingId(null);
+      return;
+    }
     if (
-      !shouldSave ||
-      (resize.currentStart === resize.originStart &&
-        resize.currentEnd === resize.originEnd)
+      resize.currentStart === resize.originStart &&
+      resize.currentEnd === resize.originEnd
     ) {
       return;
     }
+    setAdjustingId(null);
     const activity = activities.find((item) => item.id === resize.id);
     if (!activity) return;
     const changes = {
@@ -1039,6 +1079,21 @@ export default function Home() {
       setStorageError(true);
       await refresh();
     }
+  }
+
+  function toggleAdjustment(
+    event: React.MouseEvent<HTMLButtonElement>,
+    activity: Activity,
+  ) {
+    event.stopPropagation();
+    const willAdjust = adjustingId !== activity.id;
+    setAdjustingId(willAdjust ? activity.id : null);
+    setToast(
+      willAdjust
+        ? "Drag the middle to move · drag an edge to resize"
+        : "Adjustment mode off",
+    );
+    if (willAdjust) navigator.vibrate?.(12);
   }
 
   function chooseTimelineTime(event: React.MouseEvent<HTMLDivElement>) {
@@ -1367,6 +1422,7 @@ export default function Home() {
               const displayedDuration = displayedEnd - displayedStart;
               const isCompact = displayedDuration <= 30;
               const isMicro = displayedDuration <= 15;
+              const isAdjusting = adjustingId === item.id;
               const isRecurring =
                 Boolean(item.seriesId) ||
                 (item.repeat !== undefined && item.repeat !== "none");
@@ -1384,6 +1440,8 @@ export default function Home() {
                     isCompact ? "is-compact" : ""
                   } ${
                     isMicro ? "is-micro" : ""
+                  } ${
+                    isAdjusting ? "is-adjusting" : ""
                   }`}
                   style={{
                     top: `${top}px`,
@@ -1403,7 +1461,7 @@ export default function Home() {
                     if (!suppressClickRef.current) openEdit(item);
                   }}
                   onKeyDown={(event) => keyboardOpen(event, item)}
-                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}. Press and hold to move, or drag an edge to resize.`}
+                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}. Use the adjust button to move or resize.`}
                   aria-grabbed={isDragging}
                 >
                   {(isDragging || isResizing) && (
@@ -1451,6 +1509,20 @@ export default function Home() {
                     </strong>
                     {height > 62 && item.note && <small>{item.note}</small>}
                   </div>
+                  <button
+                    className="adjust-button"
+                    type="button"
+                    aria-pressed={isAdjusting}
+                    aria-label={
+                      isAdjusting
+                        ? `Stop adjusting ${item.title}`
+                        : `Adjust ${item.title} position or duration`
+                    }
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => toggleAdjustment(event, item)}
+                  >
+                    ↕
+                  </button>
                   <span className="activity-time">
                     {friendlyTime(item.start).replace(" ", "")}
                     <b>—</b>

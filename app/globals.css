@@ -395,14 +395,21 @@ textarea:focus-visible,
   border-radius: 15px;
   padding: 11px 12px;
   box-shadow: 0 8px 20px rgba(38, 47, 42, 0.07);
-  cursor: grab;
+  cursor: pointer;
   pointer-events: auto;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
   transition:
     transform 160ms ease,
     box-shadow 160ms ease;
+}
+
+.activity-block.is-adjusting {
+  outline: 2px solid rgba(23, 34, 31, 0.62);
+  outline-offset: 2px;
+  cursor: grab;
+  touch-action: none;
 }
 
 .activity-block.is-compact {
@@ -427,6 +434,13 @@ textarea:focus-visible,
   font-size: 8px;
 }
 
+.activity-block.is-compact .adjust-button {
+  width: 19px;
+  height: 19px;
+  flex-basis: 19px;
+  font-size: 12px;
+}
+
 .activity-block.is-micro {
   gap: 4px;
   border-radius: 7px;
@@ -434,6 +448,7 @@ textarea:focus-visible,
 }
 
 .activity-block.is-micro .complete-button,
+.activity-block.is-micro .adjust-button,
 .activity-block.is-micro .activity-time,
 .activity-block.is-micro .repeat-badge {
   display: none;
@@ -491,7 +506,15 @@ textarea:focus-visible,
   z-index: 5;
   height: 15px;
   cursor: ns-resize;
+  opacity: 0;
+  pointer-events: none;
   touch-action: none;
+  transition: opacity 120ms ease;
+}
+
+.activity-block.is-adjusting .resize-handle {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .resize-handle::after {
@@ -576,6 +599,29 @@ textarea:focus-visible,
   font-size: 12px;
   font-weight: 900;
   cursor: pointer;
+}
+
+.adjust-button {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  place-items: center;
+  border: 1px solid rgba(23, 34, 31, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.3);
+  color: rgba(23, 34, 31, 0.66);
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.adjust-button[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: white;
 }
 
 .activity-copy {
