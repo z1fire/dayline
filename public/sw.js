@@ -1,4 +1,4 @@
-const CACHE = "dayline-v2";
+const CACHE = "dayline-v3";
 const HOME = new URL("./", self.registration.scope).pathname;
 const PRECACHE = [
   HOME,

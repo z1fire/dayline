@@ -11,7 +11,13 @@ import {
 } from "react";
 
 type Category = "focus" | "health" | "admin" | "personal" | "rest";
-type RepeatRule = "none" | "daily" | "weekdays" | "weekly";
+type RepeatRule =
+  | "none"
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "custom"
+  | "interval";
 
 type Activity = {
   id: string;
@@ -23,6 +29,8 @@ type Activity = {
   note: string;
   completed: boolean;
   repeat?: RepeatRule;
+  repeatDays?: number[];
+  repeatInterval?: number;
   seriesId?: string;
   seriesStartDate?: string;
   isException?: boolean;
@@ -55,6 +63,15 @@ const categories: { id: Category; label: string; symbol: string }[] = [
   { id: "admin", label: "Admin", symbol: "□" },
   { id: "personal", label: "Personal", symbol: "◆" },
   { id: "rest", label: "Rest", symbol: "☾" },
+];
+const repeatDayOptions = [
+  { value: 1, label: "Mon", longLabel: "Monday" },
+  { value: 2, label: "Tue", longLabel: "Tuesday" },
+  { value: 3, label: "Wed", longLabel: "Wednesday" },
+  { value: 4, label: "Thu", longLabel: "Thursday" },
+  { value: 5, label: "Fri", longLabel: "Friday" },
+  { value: 6, label: "Sat", longLabel: "Saturday" },
+  { value: 0, label: "Sun", longLabel: "Sunday" },
 ];
 
 function toDateKey(date: Date) {
@@ -111,18 +128,29 @@ function dayHeading(key: string) {
   });
 }
 
-function repeatLabel(rule: RepeatRule | undefined) {
+function repeatLabel(
+  rule: RepeatRule | undefined,
+  repeatDays: number[] = [],
+  repeatInterval = 1,
+) {
   if (rule === "daily") return "Every day";
   if (rule === "weekdays") return "Weekdays";
   if (rule === "weekly") return "Every week";
+  if (rule === "custom") {
+    const labels = repeatDayOptions
+      .filter((day) => repeatDays.includes(day.value))
+      .map((day) => day.label);
+    return labels.length ? labels.join(", ") : "Selected days";
+  }
+  if (rule === "interval") {
+    return `Every ${Math.max(2, repeatInterval)} days`;
+  }
   return "Does not repeat";
 }
 
-function recurrenceMatches(
-  startDate: string,
-  targetDate: string,
-  rule: RepeatRule,
-) {
+function recurrenceMatches(activity: Activity, targetDate: string) {
+  const startDate = activity.date;
+  const rule = activity.repeat ?? "none";
   if (targetDate < startDate || rule === "none") return false;
   const target = fromDateKey(targetDate);
   if (rule === "daily") return true;
@@ -130,9 +158,15 @@ function recurrenceMatches(
     const weekday = target.getDay();
     return weekday >= 1 && weekday <= 5;
   }
+  if (rule === "custom") {
+    return (activity.repeatDays ?? []).includes(target.getDay());
+  }
   const elapsedDays = Math.round(
     (target.getTime() - fromDateKey(startDate).getTime()) / 86_400_000,
   );
+  if (rule === "interval") {
+    return elapsedDays % Math.max(2, activity.repeatInterval ?? 2) === 0;
+  }
   return rule === "weekly" && elapsedDays % 7 === 0;
 }
 
@@ -178,7 +212,7 @@ async function readActivities(date: string) {
           !item.deleted,
       );
       const recurringActivities = series.flatMap((base) => {
-        if (!recurrenceMatches(base.date, date, base.repeat!)) return [];
+        if (!recurrenceMatches(base, date)) return [];
         const exception = records.find(
           (item) => item.seriesId === base.id && item.date === date,
         );
@@ -425,6 +459,8 @@ export default function Home() {
   const [category, setCategory] = useState<Category>("focus");
   const [note, setNote] = useState("");
   const [repeat, setRepeat] = useState<RepeatRule>("none");
+  const [repeatDays, setRepeatDays] = useState<number[]>([]);
+  const [repeatInterval, setRepeatInterval] = useState(2);
   const [templates, setTemplates] = useState<DayTemplate[]>([]);
   const [copySourceDate, setCopySourceDate] = useState(() =>
     shiftDate(toDateKey(new Date()), -1),
@@ -612,10 +648,14 @@ export default function Home() {
   const isToday = selectedDate === toDateKey(new Date());
   const isWithinDay =
     minutes(start) >= dayStart && minutes(end) <= DAY_END;
+  const isRepeatValid =
+    repeat !== "custom" ||
+    repeatDays.length > 0;
   const isValid =
     title.trim() &&
     minutes(start) < minutes(end) &&
-    isWithinDay;
+    isWithinDay &&
+    isRepeatValid;
 
   function openCreate(startMinute = 9 * 60) {
     const rounded = Math.round(startMinute / 15) * 15;
@@ -629,6 +669,8 @@ export default function Home() {
     setCategory("focus");
     setNote("");
     setRepeat("none");
+    setRepeatDays([fromDateKey(selectedDate).getDay()]);
+    setRepeatInterval(2);
     setSheetOpen(true);
   }
 
@@ -642,7 +684,28 @@ export default function Home() {
     setCategory(activity.category);
     setNote(activity.note);
     setRepeat(activity.repeat ?? "none");
+    setRepeatDays(
+      activity.repeatDays?.length
+        ? activity.repeatDays
+        : [fromDateKey(activity.date).getDay()],
+    );
+    setRepeatInterval(activity.repeatInterval ?? 2);
     setSheetOpen(true);
+  }
+
+  function chooseRepeatRule(rule: RepeatRule) {
+    setRepeat(rule);
+    if (rule === "custom" && repeatDays.length === 0) {
+      setRepeatDays([fromDateKey(selectedDate).getDay()]);
+    }
+  }
+
+  function toggleRepeatDay(day: number) {
+    setRepeatDays((days) =>
+      days.includes(day)
+        ? days.filter((item) => item !== day)
+        : [...days, day],
+    );
   }
 
   async function save(event: FormEvent) {
@@ -659,7 +722,13 @@ export default function Home() {
       if (editingActivity?.seriesId && editScope === "series") {
         const base = await readStoredActivity(editingActivity.seriesId);
         if (!base) throw new Error("Series not found");
-        await writeActivity({ ...base, ...changes });
+        await writeActivity({
+          ...base,
+          ...changes,
+          repeat,
+          repeatDays: repeat === "custom" ? repeatDays : undefined,
+          repeatInterval: repeat === "interval" ? repeatInterval : undefined,
+        });
         setToast("Recurring series updated");
       } else if (editingActivity?.seriesId) {
         await writeActivity(occurrenceRecord(editingActivity, changes));
@@ -675,10 +744,14 @@ export default function Home() {
           note: note.trim(),
           completed: editingActivity?.completed ?? false,
           repeat,
+          repeatDays: repeat === "custom" ? repeatDays : undefined,
+          repeatInterval: repeat === "interval" ? repeatInterval : undefined,
         };
         await writeActivity(activity);
         setToast(
-          repeat === "none" ? "Block saved" : `${repeatLabel(repeat)} added`,
+          repeat === "none"
+            ? "Block saved"
+            : `${repeatLabel(repeat, repeatDays, repeatInterval)} added`,
         );
       }
       await refresh();
@@ -1366,7 +1439,11 @@ export default function Home() {
                       {isRecurring && (
                         <span
                           className="repeat-badge"
-                          title={repeatLabel(item.repeat)}
+                          title={repeatLabel(
+                            item.repeat,
+                            item.repeatDays,
+                            item.repeatInterval,
+                          )}
                         >
                           ↻
                         </span>
@@ -1481,9 +1558,16 @@ export default function Home() {
                 Overlapping blocks are allowed and will appear side by side.
               </p>
 
-              {editingActivity?.seriesId ? (
+              {editingActivity?.seriesId && (
                 <fieldset className="repeat-field">
-                  <legend>Recurring block · {repeatLabel(editingActivity.repeat)}</legend>
+                  <legend>
+                    Recurring block ·{" "}
+                    {repeatLabel(
+                      editingActivity.repeat,
+                      editingActivity.repeatDays,
+                      editingActivity.repeatInterval,
+                    )}
+                  </legend>
                   <div className="scope-options">
                     <button
                       className={editScope === "occurrence" ? "is-selected" : ""}
@@ -1501,9 +1585,13 @@ export default function Home() {
                     </button>
                   </div>
                 </fieldset>
-              ) : (
+              )}
+
+              {(!editingActivity?.seriesId || editScope === "series") && (
                 <fieldset className="repeat-field">
-                  <legend>Repeat</legend>
+                  <legend>
+                    {editingActivity?.seriesId ? "Repeat pattern" : "Repeat"}
+                  </legend>
                   <div className="repeat-options">
                     {(
                       [
@@ -1511,8 +1599,14 @@ export default function Home() {
                         ["daily", "Daily"],
                         ["weekdays", "Weekdays"],
                         ["weekly", "Weekly"],
+                        ["custom", "Choose days"],
+                        ["interval", "Every N days"],
                       ] as [RepeatRule, string][]
-                    ).map(([rule, label]) => (
+                    )
+                      .filter(
+                        ([rule]) => !editingActivity?.seriesId || rule !== "none",
+                      )
+                      .map(([rule, label]) => (
                       <label
                         className={repeat === rule ? "is-selected" : ""}
                         key={rule}
@@ -1522,12 +1616,67 @@ export default function Home() {
                           name="repeat"
                           value={rule}
                           checked={repeat === rule}
-                          onChange={() => setRepeat(rule)}
+                          onChange={() => chooseRepeatRule(rule)}
                         />
                         {label}
                       </label>
-                    ))}
+                      ))}
                   </div>
+
+                  {repeat === "custom" && (
+                    <div className="custom-repeat-panel">
+                      <span>Repeat on</span>
+                      <div
+                        className="repeat-day-options"
+                        aria-label="Days of the week"
+                      >
+                        {repeatDayOptions.map((day) => (
+                          <button
+                            className={
+                              repeatDays.includes(day.value)
+                                ? "is-selected"
+                                : ""
+                            }
+                            type="button"
+                            aria-pressed={repeatDays.includes(day.value)}
+                            aria-label={day.longLabel}
+                            key={day.value}
+                            onClick={() => toggleRepeatDay(day.value)}
+                          >
+                            {day.label}
+                          </button>
+                        ))}
+                      </div>
+                      {!isRepeatValid && (
+                        <p className="form-warning">
+                          Choose at least one day.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {repeat === "interval" && (
+                    <label className="interval-repeat">
+                      <span>Repeat every</span>
+                      <input
+                        type="number"
+                        min={2}
+                        max={30}
+                        inputMode="numeric"
+                        value={repeatInterval}
+                        onChange={(event) =>
+                          setRepeatInterval(
+                            Math.min(
+                              30,
+                              Math.max(2, Number(event.target.value) || 2),
+                            ),
+                          )
+                        }
+                        aria-label="Number of days between repeats"
+                      />
+                      <span>days</span>
+                    </label>
+                  )}
                 </fieldset>
               )}
 
