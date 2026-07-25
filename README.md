@@ -9,7 +9,11 @@ IndexedDB and continue to work offline after the first visit.
 - plan activities as colored blocks on a single-day timeline
 - move between dates and see planned/open time at a glance
 - add, edit, complete, and delete blocks
-- prevent accidental schedule overlaps
+- overlap blocks and see them side by side
+- press and hold to move blocks, or drag their edges to resize them
+- repeat blocks daily, on weekdays, or weekly
+- copy another day or save reusable day templates
+- choose how early the timeline starts
 - install from Chrome on Android
 - keep working without a network connection
 

@@ -11,6 +11,7 @@ import {
 } from "react";
 
 type Category = "focus" | "health" | "admin" | "personal" | "rest";
+type RepeatRule = "none" | "daily" | "weekdays" | "weekly";
 
 type Activity = {
   id: string;
@@ -21,6 +22,23 @@ type Activity = {
   category: Category;
   note: string;
   completed: boolean;
+  repeat?: RepeatRule;
+  seriesId?: string;
+  seriesStartDate?: string;
+  isException?: boolean;
+  deleted?: boolean;
+};
+
+type TemplateBlock = Pick<
+  Activity,
+  "title" | "start" | "end" | "category" | "note"
+>;
+
+type DayTemplate = {
+  id: string;
+  name: string;
+  blocks: TemplateBlock[];
+  createdAt: string;
 };
 
 type InstallPromptEvent = Event & {
@@ -93,13 +111,43 @@ function dayHeading(key: string) {
   });
 }
 
+function repeatLabel(rule: RepeatRule | undefined) {
+  if (rule === "daily") return "Every day";
+  if (rule === "weekdays") return "Weekdays";
+  if (rule === "weekly") return "Every week";
+  return "Does not repeat";
+}
+
+function recurrenceMatches(
+  startDate: string,
+  targetDate: string,
+  rule: RepeatRule,
+) {
+  if (targetDate < startDate || rule === "none") return false;
+  const target = fromDateKey(targetDate);
+  if (rule === "daily") return true;
+  if (rule === "weekdays") {
+    const weekday = target.getDay();
+    return weekday >= 1 && weekday <= 5;
+  }
+  const elapsedDays = Math.round(
+    (target.getTime() - fromDateKey(startDate).getTime()) / 86_400_000,
+  );
+  return rule === "weekly" && elapsedDays % 7 === 0;
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("dayline-planner", 1);
+    const request = indexedDB.open("dayline-planner", 2);
     request.onupgradeneeded = () => {
       const database = request.result;
-      const store = database.createObjectStore("activities", { keyPath: "id" });
-      store.createIndex("date", "date", { unique: false });
+      if (!database.objectStoreNames.contains("activities")) {
+        const store = database.createObjectStore("activities", { keyPath: "id" });
+        store.createIndex("date", "date", { unique: false });
+      }
+      if (!database.objectStoreNames.contains("templates")) {
+        database.createObjectStore("templates", { keyPath: "id" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -112,14 +160,48 @@ async function readActivities(date: string) {
     const request = database
       .transaction("activities", "readonly")
       .objectStore("activities")
-      .index("date")
-      .getAll(date);
-    request.onsuccess = () =>
+      .getAll();
+    request.onsuccess = () => {
+      const records = request.result as Activity[];
+      const normalActivities = records.filter(
+        (item) =>
+          item.date === date &&
+          !item.seriesId &&
+          (!item.repeat || item.repeat === "none") &&
+          !item.deleted,
+      );
+      const series = records.filter(
+        (item) =>
+          !item.seriesId &&
+          item.repeat &&
+          item.repeat !== "none" &&
+          !item.deleted,
+      );
+      const recurringActivities = series.flatMap((base) => {
+        if (!recurrenceMatches(base.date, date, base.repeat!)) return [];
+        const exception = records.find(
+          (item) => item.seriesId === base.id && item.date === date,
+        );
+        if (exception?.deleted) return [];
+        if (exception) return [exception];
+        return [
+          {
+            ...base,
+            id: `occurrence:${base.id}:${date}`,
+            date,
+            seriesId: base.id,
+            seriesStartDate: base.date,
+            isException: false,
+            completed: false,
+          },
+        ];
+      });
       resolve(
-        (request.result as Activity[]).sort(
+        [...normalActivities, ...recurringActivities].sort(
           (a, b) => minutes(a.start) - minutes(b.start),
         ),
       );
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -146,6 +228,90 @@ async function removeActivity(id: string) {
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
+}
+
+async function removeSeries(seriesId: string) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction("activities", "readwrite");
+    const store = transaction.objectStore("activities");
+    const request = store.getAll();
+    request.onsuccess = () => {
+      (request.result as Activity[])
+        .filter((item) => item.id === seriesId || item.seriesId === seriesId)
+        .forEach((item) => store.delete(item.id));
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+async function readStoredActivity(id: string) {
+  const database = await openDatabase();
+  return new Promise<Activity | undefined>((resolve, reject) => {
+    const request = database
+      .transaction("activities", "readonly")
+      .objectStore("activities")
+      .get(id);
+    request.onsuccess = () => resolve(request.result as Activity | undefined);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readTemplates() {
+  const database = await openDatabase();
+  return new Promise<DayTemplate[]>((resolve, reject) => {
+    const request = database
+      .transaction("templates", "readonly")
+      .objectStore("templates")
+      .getAll();
+    request.onsuccess = () =>
+      resolve(
+        (request.result as DayTemplate[]).sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt),
+        ),
+      );
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function writeTemplate(template: DayTemplate) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database
+      .transaction("templates", "readwrite")
+      .objectStore("templates")
+      .put(template);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function removeTemplate(id: string) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database
+      .transaction("templates", "readwrite")
+      .objectStore("templates")
+      .delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function occurrenceRecord(
+  activity: Activity,
+  changes: Partial<Activity>,
+): Activity {
+  if (!activity.seriesId) return { ...activity, ...changes };
+  return {
+    ...activity,
+    ...changes,
+    id: `exception:${activity.seriesId}:${activity.date}`,
+    seriesId: activity.seriesId,
+    seriesStartDate: activity.seriesStartDate,
+    isException: true,
+  };
 }
 
 function starterActivities(date: string): Activity[] {
@@ -247,18 +413,37 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
+  const [editScope, setEditScope] = useState<"occurrence" | "series">(
+    "occurrence",
+  );
   const [title, setTitle] = useState("");
   const [start, setStart] = useState("09:00");
   const [end, setEnd] = useState("10:00");
   const [category, setCategory] = useState<Category>("focus");
   const [note, setNote] = useState("");
+  const [repeat, setRepeat] = useState<RepeatRule>("none");
+  const [templates, setTemplates] = useState<DayTemplate[]>([]);
+  const [copySourceDate, setCopySourceDate] = useState(() =>
+    shiftDate(toDateKey(new Date()), -1),
+  );
+  const [templateName, setTemplateName] = useState("My day");
+  const [toolsMessage, setToolsMessage] = useState("");
+  const [toast, setToast] = useState("");
   const [storageError, setStorageError] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [dragPreview, setDragPreview] = useState<{
     id: string;
     start: number;
     duration: number;
+  } | null>(null);
+  const [resizePreview, setResizePreview] = useState<{
+    id: string;
+    start: number;
+    end: number;
+    edge: "start" | "end";
   } | null>(null);
   const [installPrompt, setInstallPrompt] =
     useState<InstallPromptEvent | null>(null);
@@ -275,6 +460,18 @@ export default function Home() {
     currentStart: number;
     active: boolean;
     movedBeforeHold: boolean;
+  } | null>(null);
+  const resizeRef = useRef<{
+    id: string;
+    pointerId: number;
+    element: HTMLSpanElement;
+    edge: "start" | "end";
+    pointerStartY: number;
+    scrollStartY: number;
+    originStart: number;
+    originEnd: number;
+    currentStart: number;
+    currentEnd: number;
   } | null>(null);
 
   async function refresh(date = selectedDate) {
@@ -350,16 +547,23 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!sheetOpen && !settingsOpen) return;
+    if (!sheetOpen && !settingsOpen && !toolsOpen) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setSheetOpen(false);
         setSettingsOpen(false);
+        setToolsOpen(false);
       }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [sheetOpen, settingsOpen]);
+  }, [sheetOpen, settingsOpen, toolsOpen]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 2600);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const plannedMinutes = useMemo(
     () =>
@@ -417,40 +621,66 @@ export default function Home() {
     const rounded = Math.round(startMinute / 15) * 15;
     const safeStart = Math.min(DAY_END - 30, Math.max(dayStart, rounded));
     setEditingId(null);
+    setEditingActivity(null);
+    setEditScope("occurrence");
     setTitle("");
     setStart(minuteTime(safeStart));
     setEnd(minuteTime(Math.min(DAY_END, safeStart + 60)));
     setCategory("focus");
     setNote("");
+    setRepeat("none");
     setSheetOpen(true);
   }
 
   function openEdit(activity: Activity) {
     setEditingId(activity.id);
+    setEditingActivity(activity);
+    setEditScope("occurrence");
     setTitle(activity.title);
     setStart(activity.start);
     setEnd(activity.end);
     setCategory(activity.category);
     setNote(activity.note);
+    setRepeat(activity.repeat ?? "none");
     setSheetOpen(true);
   }
 
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!isValid) return;
-    const previous = activities.find((item) => item.id === editingId);
-    const activity: Activity = {
-      id: editingId ?? crypto.randomUUID(),
-      date: selectedDate,
-      title: title.trim(),
-      start,
-      end,
-      category,
-      note: note.trim(),
-      completed: previous?.completed ?? false,
-    };
     try {
-      await writeActivity(activity);
+      const changes: Partial<Activity> = {
+        title: title.trim(),
+        start,
+        end,
+        category,
+        note: note.trim(),
+      };
+      if (editingActivity?.seriesId && editScope === "series") {
+        const base = await readStoredActivity(editingActivity.seriesId);
+        if (!base) throw new Error("Series not found");
+        await writeActivity({ ...base, ...changes });
+        setToast("Recurring series updated");
+      } else if (editingActivity?.seriesId) {
+        await writeActivity(occurrenceRecord(editingActivity, changes));
+        setToast("This occurrence was updated");
+      } else {
+        const activity: Activity = {
+          id: editingId ?? crypto.randomUUID(),
+          date: selectedDate,
+          title: title.trim(),
+          start,
+          end,
+          category,
+          note: note.trim(),
+          completed: editingActivity?.completed ?? false,
+          repeat,
+        };
+        await writeActivity(activity);
+        setToast(
+          repeat === "none" ? "Block saved" : `${repeatLabel(repeat)} added`,
+        );
+      }
       await refresh();
       setSheetOpen(false);
     } catch {
@@ -459,9 +689,20 @@ export default function Home() {
   }
 
   async function deleteCurrent() {
-    if (!editingId) return;
+    if (!editingId || !editingActivity) return;
     try {
-      await removeActivity(editingId);
+      if (editingActivity.seriesId && editScope === "series") {
+        await removeSeries(editingActivity.seriesId);
+        setToast("Recurring series deleted");
+      } else if (editingActivity.seriesId) {
+        await writeActivity(
+          occurrenceRecord(editingActivity, { deleted: true }),
+        );
+        setToast("Occurrence deleted");
+      } else {
+        await removeActivity(editingId);
+        setToast("Block deleted");
+      }
       await refresh();
       setSheetOpen(false);
     } catch {
@@ -471,7 +712,9 @@ export default function Home() {
 
   async function toggleCompleted(activity: Activity) {
     try {
-      await writeActivity({ ...activity, completed: !activity.completed });
+      await writeActivity(
+        occurrenceRecord(activity, { completed: !activity.completed }),
+      );
       await refresh();
     } catch {
       setStorageError(true);
@@ -491,7 +734,7 @@ export default function Home() {
   ) {
     if (
       event.button !== 0 ||
-      (event.target as HTMLElement).closest(".complete-button")
+      (event.target as HTMLElement).closest(".complete-button, .resize-handle")
     ) {
       return;
     }
@@ -595,16 +838,129 @@ export default function Home() {
 
     const activity = activities.find((item) => item.id === press.id);
     if (!activity) return;
-    const movedActivity = {
-      ...activity,
+    const changes = {
       start: minuteTime(press.currentStart),
       end: minuteTime(press.currentStart + press.duration),
+    };
+    const movedActivity = {
+      ...activity,
+      ...changes,
     };
     setActivities((items) =>
       items.map((item) => (item.id === movedActivity.id ? movedActivity : item)),
     );
     try {
-      await writeActivity(movedActivity);
+      await writeActivity(occurrenceRecord(activity, changes));
+      await refresh();
+    } catch {
+      setStorageError(true);
+      await refresh();
+    }
+  }
+
+  function beginResize(
+    event: ReactPointerEvent<HTMLSpanElement>,
+    activity: Activity,
+    edge: "start" | "end",
+  ) {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    clearPressTimer();
+    suppressClickRef.current = true;
+    const element = event.currentTarget;
+    element.setPointerCapture(event.pointerId);
+    const originStart = minutes(activity.start);
+    const originEnd = minutes(activity.end);
+    resizeRef.current = {
+      id: activity.id,
+      pointerId: event.pointerId,
+      element,
+      edge,
+      pointerStartY: event.clientY,
+      scrollStartY: window.scrollY,
+      originStart,
+      originEnd,
+      currentStart: originStart,
+      currentEnd: originEnd,
+    };
+    setResizePreview({
+      id: activity.id,
+      start: originStart,
+      end: originEnd,
+      edge,
+    });
+  }
+
+  function moveResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    event.preventDefault();
+    if (event.clientY < 72) {
+      window.scrollBy({ top: -12, behavior: "auto" });
+    } else if (event.clientY > window.innerHeight - 72) {
+      window.scrollBy({ top: 12, behavior: "auto" });
+    }
+    const pointerDelta =
+      event.clientY -
+      resize.pointerStartY +
+      (window.scrollY - resize.scrollStartY);
+    const minuteDelta = Math.round(((pointerDelta / HOUR_HEIGHT) * 60) / 15) * 15;
+    if (resize.edge === "start") {
+      resize.currentStart = Math.min(
+        resize.originEnd - 15,
+        Math.max(dayStart, resize.originStart + minuteDelta),
+      );
+    } else {
+      resize.currentEnd = Math.min(
+        DAY_END,
+        Math.max(resize.originStart + 15, resize.originEnd + minuteDelta),
+      );
+    }
+    setResizePreview({
+      id: resize.id,
+      start: resize.currentStart,
+      end: resize.currentEnd,
+      edge: resize.edge,
+    });
+  }
+
+  async function endResize(
+    event: ReactPointerEvent<HTMLSpanElement>,
+    shouldSave: boolean,
+  ) {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    if (resize.element.hasPointerCapture(event.pointerId)) {
+      resize.element.releasePointerCapture(event.pointerId);
+    }
+    resizeRef.current = null;
+    setResizePreview(null);
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+    if (
+      !shouldSave ||
+      (resize.currentStart === resize.originStart &&
+        resize.currentEnd === resize.originEnd)
+    ) {
+      return;
+    }
+    const activity = activities.find((item) => item.id === resize.id);
+    if (!activity) return;
+    const changes = {
+      start: minuteTime(resize.currentStart),
+      end: minuteTime(resize.currentEnd),
+    };
+    setActivities((items) =>
+      items.map((item) =>
+        item.id === activity.id ? { ...item, ...changes } : item,
+      ),
+    );
+    try {
+      await writeActivity(occurrenceRecord(activity, changes));
       await refresh();
     } catch {
       setStorageError(true);
@@ -642,6 +998,113 @@ export default function Home() {
     setDayStart(pendingDayStart);
     localStorage.setItem("dayline-day-start", String(pendingDayStart));
     setSettingsOpen(false);
+  }
+
+  async function openDayTools() {
+    setCopySourceDate(shiftDate(selectedDate, -1));
+    setToolsMessage("");
+    try {
+      setTemplates(await readTemplates());
+      setToolsOpen(true);
+    } catch {
+      setStorageError(true);
+    }
+  }
+
+  async function addBlocksToSelectedDate(blocks: TemplateBlock[]) {
+    await Promise.all(
+      blocks.map((block) =>
+        writeActivity({
+          ...block,
+          id: crypto.randomUUID(),
+          date: selectedDate,
+          completed: false,
+          repeat: "none",
+        }),
+      ),
+    );
+  }
+
+  async function copyDay() {
+    try {
+      const sourceActivities = await readActivities(copySourceDate);
+      if (!sourceActivities.length) {
+        setToolsMessage("That day has no blocks to copy.");
+        return;
+      }
+      await addBlocksToSelectedDate(
+        sourceActivities.map(
+          ({ title: blockTitle, start: blockStart, end: blockEnd, category: blockCategory, note: blockNote }) => ({
+            title: blockTitle,
+            start: blockStart,
+            end: blockEnd,
+            category: blockCategory,
+            note: blockNote,
+          }),
+        ),
+      );
+      await refresh();
+      setToolsOpen(false);
+      setToast(
+        `${sourceActivities.length} ${sourceActivities.length === 1 ? "block" : "blocks"} copied`,
+      );
+    } catch {
+      setStorageError(true);
+    }
+  }
+
+  async function saveCurrentDayTemplate() {
+    const name = templateName.trim();
+    if (!name) {
+      setToolsMessage("Give this template a name first.");
+      return;
+    }
+    if (!activities.length) {
+      setToolsMessage("Add at least one block before saving a template.");
+      return;
+    }
+    try {
+      await writeTemplate({
+        id: crypto.randomUUID(),
+        name,
+        createdAt: new Date().toISOString(),
+        blocks: activities.map(
+          ({ title: blockTitle, start: blockStart, end: blockEnd, category: blockCategory, note: blockNote }) => ({
+            title: blockTitle,
+            start: blockStart,
+            end: blockEnd,
+            category: blockCategory,
+            note: blockNote,
+          }),
+        ),
+      });
+      setTemplates(await readTemplates());
+      setTemplateName("My day");
+      setToolsMessage(`Saved “${name}” for future days.`);
+    } catch {
+      setStorageError(true);
+    }
+  }
+
+  async function applyTemplate(template: DayTemplate) {
+    try {
+      await addBlocksToSelectedDate(template.blocks);
+      await refresh();
+      setToolsOpen(false);
+      setToast(`“${template.name}” added to this day`);
+    } catch {
+      setStorageError(true);
+    }
+  }
+
+  async function deleteTemplate(templateId: string) {
+    try {
+      await removeTemplate(templateId);
+      setTemplates(await readTemplates());
+      setToolsMessage("Template removed.");
+    } catch {
+      setStorageError(true);
+    }
   }
 
   const timelineHours = Array.from(
@@ -759,6 +1222,13 @@ export default function Home() {
           </div>
           <div className="schedule-actions">
             <button
+              className="day-tools-button"
+              type="button"
+              onClick={openDayTools}
+            >
+              Copy / templates
+            </button>
+            <button
               className="day-start-button"
               type="button"
               onClick={openDaySettings}
@@ -807,12 +1277,23 @@ export default function Home() {
             <div className="activity-layer">
               {positionedActivities.map(({ activity: item, lane, laneCount }) => {
               const isDragging = dragPreview?.id === item.id;
-              const displayedStart = isDragging
-                ? dragPreview!.start
-                : minutes(item.start);
+              const isResizing = resizePreview?.id === item.id;
+              const displayedStart = isResizing
+                ? resizePreview!.start
+                : isDragging
+                  ? dragPreview!.start
+                  : minutes(item.start);
+              const displayedEnd = isResizing
+                ? resizePreview!.end
+                : isDragging
+                  ? dragPreview!.start + dragPreview!.duration
+                  : minutes(item.end);
               const top = ((displayedStart - dayStart) / 60) * HOUR_HEIGHT;
               const height =
-                ((minutes(item.end) - minutes(item.start)) / 60) * HOUR_HEIGHT;
+                ((displayedEnd - displayedStart) / 60) * HOUR_HEIGHT;
+              const isRecurring =
+                Boolean(item.seriesId) ||
+                (item.repeat !== undefined && item.repeat !== "none");
               return (
                 <div
                   className={`activity-block category-${item.category} ${
@@ -821,6 +1302,8 @@ export default function Home() {
                     item.completed ? "is-complete" : ""
                   } ${
                     isDragging ? "is-dragging" : ""
+                  } ${
+                    isResizing ? "is-resizing" : ""
                   }`}
                   style={{
                     top: `${top}px`,
@@ -840,18 +1323,25 @@ export default function Home() {
                     if (!suppressClickRef.current) openEdit(item);
                   }}
                   onKeyDown={(event) => keyboardOpen(event, item)}
-                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}. Press and hold to move.`}
+                  aria-label={`Edit ${item.title}, ${friendlyTime(item.start)} to ${friendlyTime(item.end)}. Press and hold to move, or drag an edge to resize.`}
                   aria-grabbed={isDragging}
                 >
-                  {isDragging && (
+                  {(isDragging || isResizing) && (
                     <span className="drag-time-pill">
-                      {friendlyTime(minuteTime(dragPreview!.start))}
+                      {friendlyTime(minuteTime(displayedStart))}
                       {" — "}
-                      {friendlyTime(
-                        minuteTime(dragPreview!.start + dragPreview!.duration),
-                      )}
+                      {friendlyTime(minuteTime(displayedEnd))}
                     </span>
                   )}
+                  <span
+                    className="resize-handle resize-start"
+                    onPointerDown={(event) => beginResize(event, item, "start")}
+                    onPointerMove={moveResize}
+                    onPointerUp={(event) => endResize(event, true)}
+                    onPointerCancel={(event) => endResize(event, false)}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-hidden="true"
+                  />
                   <button
                     className="complete-button"
                     type="button"
@@ -864,7 +1354,17 @@ export default function Home() {
                     {item.completed ? "✓" : ""}
                   </button>
                   <div className="activity-copy">
-                    <strong>{item.title}</strong>
+                    <strong>
+                      {item.title}
+                      {isRecurring && (
+                        <span
+                          className="repeat-badge"
+                          title={repeatLabel(item.repeat)}
+                        >
+                          ↻
+                        </span>
+                      )}
+                    </strong>
                     {height > 62 && item.note && <small>{item.note}</small>}
                   </div>
                   <span className="activity-time">
@@ -872,6 +1372,15 @@ export default function Home() {
                     <b>—</b>
                     {friendlyTime(item.end).replace(" ", "")}
                   </span>
+                  <span
+                    className="resize-handle resize-end"
+                    onPointerDown={(event) => beginResize(event, item, "end")}
+                    onPointerMove={moveResize}
+                    onPointerUp={(event) => endResize(event, true)}
+                    onPointerCancel={(event) => endResize(event, false)}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-hidden="true"
+                  />
                 </div>
               );
               })}
@@ -954,7 +1463,7 @@ export default function Home() {
                   <input
                     type="time"
                     value={end}
-                    min="06:30"
+                    min={minuteTime(Math.max(dayStart, minutes(start) + 15))}
                     max="23:00"
                     step={900}
                     onChange={(event) => setEnd(event.target.value)}
@@ -964,6 +1473,56 @@ export default function Home() {
               <p className="field-hint">
                 Overlapping blocks are allowed and will appear side by side.
               </p>
+
+              {editingActivity?.seriesId ? (
+                <fieldset className="repeat-field">
+                  <legend>Recurring block · {repeatLabel(editingActivity.repeat)}</legend>
+                  <div className="scope-options">
+                    <button
+                      className={editScope === "occurrence" ? "is-selected" : ""}
+                      type="button"
+                      onClick={() => setEditScope("occurrence")}
+                    >
+                      This date only
+                    </button>
+                    <button
+                      className={editScope === "series" ? "is-selected" : ""}
+                      type="button"
+                      onClick={() => setEditScope("series")}
+                    >
+                      Entire series
+                    </button>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset className="repeat-field">
+                  <legend>Repeat</legend>
+                  <div className="repeat-options">
+                    {(
+                      [
+                        ["none", "Doesn’t repeat"],
+                        ["daily", "Daily"],
+                        ["weekdays", "Weekdays"],
+                        ["weekly", "Weekly"],
+                      ] as [RepeatRule, string][]
+                    ).map(([rule, label]) => (
+                      <label
+                        className={repeat === rule ? "is-selected" : ""}
+                        key={rule}
+                      >
+                        <input
+                          type="radio"
+                          name="repeat"
+                          value={rule}
+                          checked={repeat === rule}
+                          onChange={() => setRepeat(rule)}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
 
               <fieldset className="category-field">
                 <legend>Color</legend>
@@ -1011,11 +1570,21 @@ export default function Home() {
               <div className="form-actions">
                 {editingId && (
                   <button className="delete-button" type="button" onClick={deleteCurrent}>
-                    Delete
+                    {editingActivity?.seriesId
+                      ? editScope === "series"
+                        ? "Delete series"
+                        : "Delete this"
+                      : "Delete"}
                   </button>
                 )}
                 <button className="save-button" type="submit" disabled={!isValid}>
-                  {editingId ? "Save changes" : "Add to day"}
+                  {editingActivity?.seriesId
+                    ? editScope === "series"
+                      ? "Update series"
+                      : "Save this date"
+                    : editingId
+                      ? "Save changes"
+                      : "Add to day"}
                 </button>
               </div>
             </form>
@@ -1068,6 +1637,119 @@ export default function Home() {
               Start my day at {friendlyTime(minuteTime(pendingDayStart))}
             </button>
           </section>
+        </div>
+      )}
+
+      {toolsOpen && (
+        <div className="sheet-backdrop" onMouseDown={() => setToolsOpen(false)}>
+          <section
+            className="activity-sheet tools-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tools-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="sheet-handle" />
+            <div className="sheet-header">
+              <div>
+                <span className="eyebrow">Day tools</span>
+                <h2 id="tools-title">Plan faster</h2>
+              </div>
+              <button
+                className="close-button"
+                type="button"
+                aria-label="Close"
+                onClick={() => setToolsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="tool-section">
+              <div>
+                <strong>Copy another day</strong>
+                <p>Adds that day’s blocks here without replacing anything.</p>
+              </div>
+              <div className="tool-row">
+                <input
+                  type="date"
+                  value={copySourceDate}
+                  onChange={(event) => setCopySourceDate(event.target.value)}
+                  aria-label="Day to copy"
+                />
+                <button type="button" onClick={copyDay}>
+                  Copy to this day
+                </button>
+              </div>
+            </div>
+
+            <div className="tool-section">
+              <div>
+                <strong>Save this day as a template</strong>
+                <p>Keep the current block names, times, colors, and notes.</p>
+              </div>
+              <div className="tool-row">
+                <input
+                  type="text"
+                  value={templateName}
+                  onChange={(event) => setTemplateName(event.target.value)}
+                  placeholder="Template name"
+                  maxLength={40}
+                  aria-label="Template name"
+                />
+                <button type="button" onClick={saveCurrentDayTemplate}>
+                  Save template
+                </button>
+              </div>
+            </div>
+
+            <div className="tool-section template-section">
+              <div>
+                <strong>Saved templates</strong>
+                <p>Apply one to add all of its blocks to this day.</p>
+              </div>
+              {templates.length ? (
+                <div className="template-list">
+                  {templates.map((template) => (
+                    <div className="template-item" key={template.id}>
+                      <button
+                        className="template-apply"
+                        type="button"
+                        onClick={() => applyTemplate(template)}
+                      >
+                        <span>{template.name}</span>
+                        <small>
+                          {template.blocks.length}{" "}
+                          {template.blocks.length === 1 ? "block" : "blocks"}
+                        </small>
+                      </button>
+                      <button
+                        className="template-delete"
+                        type="button"
+                        onClick={() => deleteTemplate(template.id)}
+                        aria-label={`Delete ${template.name} template`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="no-templates">No templates saved on this device yet.</p>
+              )}
+            </div>
+            {toolsMessage && (
+              <p className="tools-message" role="status">
+                {toolsMessage}
+              </p>
+            )}
+          </section>
+        </div>
+      )}
+
+      {toast && (
+        <div className="toast" role="status">
+          {toast}
         </div>
       )}
     </main>
